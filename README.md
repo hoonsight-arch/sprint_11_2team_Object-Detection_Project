@@ -1,5 +1,11 @@
 # 💊 알약 인식 Object Detection 프로젝트
 
+## 제출 
+보고서 [2team 최종보고서.pdf](https://github.com/user-attachments/files/28588713/2team.pdf)
+
+
+
+
 > **스프린트 11 — 2팀**  
 > AIHub 제공 한국 의약품 이미지 데이터셋을 활용한 알약 탐지 및 의약품 정보 제공 시스템
 
