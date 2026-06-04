@@ -183,14 +183,34 @@ python inference_yolo26.py --checkpoint outputs/yolo/yolo26/weights/best.pt
 ## 웹 애플리케이션 실행
 
 ```bash
+실행 Sequence
+
+준비 (최초 1회)
+Ubuntu (WSL) 터미널에서(venv 인스톨되어있어야 함)
+source .venv/bin/activate
+
+로컬 PC에서만 쓸 때
+터미널 1개만 필요
+
 cd ver4_0529_FastAPI
+uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 
-# 환경 확인
-python check_env.py
+브라우저 → http://localhost:8000/
 
-# 서버 실행
-python main.py
-# → http://localhost:8000
+모바일 카메라로 쓸 때
+터미널 2개 동시에 실행
+
+터미널 1 — FastAPI 서버
+source .venv/bin/activate
+cd ver4_0529_FastAPI
+uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+
+터미널 2 — ngrok
+ngrok http 8000
+
+그러면 ngrok이 출력하는 주소 확인:
+Forwarding   https://xxxx-xx-xx.ngrok.io/ → http://localhost:8000/
+모바일 브라우저 → https://xxxx-xx-xx.ngrok.io/
 ```
 
 **기능:**
