@@ -109,7 +109,7 @@ AIHub 데이터셋 (COCO 포맷)
 ### Colab에서 실행하기
 
 1. Google Drive에 프로젝트 폴더 및 데이터셋 zip 업로드
-2. `baseline_vomega/colab_run.ipynb` 열기
+2. `baseline_vomega/colab_train_all.ipynb` 열기
 3. 셀 2에서 `DRIVE_PROJECT_DIR` 경로만 수정
 4. 위에서부터 순서대로 실행
 
