@@ -220,10 +220,6 @@ Forwarding   https://xxxx-xx-xx.ngrok.io/ → http://localhost:8000/
 - HITL(Human-In-The-Loop) 피드백 로깅 (`hitl_log.jsonl`)
 - 단계별 추론 지연 시간 프로파일링
 
-**모바일 접근 (ngrok):**
-```bash
-# main.py 내 ngrok 설정 활성화 후 생성된 URL로 접속
-```
 
 ---
 
