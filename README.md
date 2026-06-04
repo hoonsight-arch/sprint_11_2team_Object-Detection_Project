@@ -2,7 +2,7 @@
 
 ## 제출 
 보고서 [2team 최종보고서.pdf](https://github.com/user-attachments/files/28588713/2team.pdf)
-
+PPT https://drive.google.com/drive/folders/1HCIzn5HzvsI8LEeaaDdMsgf5cf72I48Q?usp=sharing
 
 
 
