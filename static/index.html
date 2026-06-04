@@ -1,0 +1,1070 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <meta name="theme-color" content="#121212">
+  <title>💊 알약 인식</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:           #121212;
+      --text:         #E0E0E0;
+      --glass-bg:     rgba(255,255,255,0.06);
+      --glass-border: rgba(255,255,255,0.10);
+      --accent:       #00C897;
+      --teal:         #008080;
+      --orange:       #FF8C00;
+      --red:          #DC143C;
+      --green:        #2E7D32;
+      --sheet-mini:   15vh;
+      --sheet-full:   58vh;
+    }
+
+    body {
+      width: 100vw; height: 100vh;
+      overflow: hidden;
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    }
+
+    /* ═══════════════════════════════════════
+       Z-Index 0 — 배경 레이어 (카메라 / 결과 이미지)
+    ═══════════════════════════════════════ */
+    #bg-layer {
+      position: fixed; inset: 0; z-index: 0; background: #000;
+    }
+    #video {
+      width: 100%; height: 100%; object-fit: cover;
+    }
+    #result-img {
+      width: 100%; height: 100%; object-fit: contain;
+      background: var(--bg); display: none;
+    }
+
+    /* ═══════════════════════════════════════
+       Z-Index 10 — 레티클 오버레이
+    ═══════════════════════════════════════ */
+    #reticle-overlay {
+      position: fixed; inset: 0; z-index: 10;
+      pointer-events: none;
+      display: flex; align-items: center; justify-content: center;
+      padding-bottom: var(--sheet-mini);
+    }
+    #reticle-box {
+      width: 240px; height: 180px;
+      border: 2px solid rgba(255,255,255,0.85);
+      border-radius: 14px;
+      /* 외곽 차폐 — 조준경 효과 */
+      box-shadow: 0 0 0 9999px rgba(0,0,0,0.40);
+      position: relative;
+    }
+    #reticle-label {
+      position: absolute; bottom: -26px; left: 50%;
+      transform: translateX(-50%);
+      font-size: 12px; color: rgba(255,255,255,0.65);
+      white-space: nowrap;
+    }
+
+
+    /* ═══════════════════════════════════════
+       Z-Index 30 — 플로팅 헤더
+    ═══════════════════════════════════════ */
+    #header {
+      position: fixed; top: 0; left: 0; right: 0; z-index: 30;
+      display: flex; justify-content: space-between; align-items: center;
+      padding: 16px 20px;
+      padding-top: max(16px, env(safe-area-inset-top));
+      background: linear-gradient(to bottom, rgba(0,0,0,0.55), transparent);
+    }
+    #header h3 { font-size: 16px; font-weight: 700; color: #fff; }
+    .header-btns { display: flex; gap: 8px; }
+    .icon-btn {
+      width: 36px; height: 36px; border-radius: 50%;
+      background: rgba(255,255,255,0.12);
+      border: 1px solid rgba(255,255,255,0.18);
+      backdrop-filter: blur(8px);
+      display: flex; align-items: center; justify-content: center;
+      cursor: pointer; color: #fff; font-size: 15px;
+      text-decoration: none;
+    }
+
+    /* ═══════════════════════════════════════
+       Z-Index 30 — FAB (카메라 캡처 버튼)
+       카메라 레이어 위에 진짜로 float
+    ═══════════════════════════════════════ */
+    #fab {
+      position: fixed;
+      bottom: calc(var(--sheet-mini) + 20px);
+      left: 50%; transform: translateX(-50%);
+      z-index: 30;
+      width: 68px; height: 68px; border-radius: 50%;
+      background: var(--accent);
+      border: 3px solid rgba(255,255,255,0.3);
+      display: flex; align-items: center; justify-content: center;
+      font-size: 26px; cursor: pointer;
+      box-shadow: 0 4px 24px rgba(0,200,150,0.45);
+      transition: transform 0.12s, box-shadow 0.12s;
+    }
+    #fab:active {
+      transform: translateX(-50%) scale(0.90);
+      box-shadow: 0 2px 12px rgba(0,200,150,0.3);
+    }
+    #file-input { display: none; }
+
+    /* ═══════════════════════════════════════
+       Z-Index 40 — 스피너
+    ═══════════════════════════════════════ */
+    #spinner {
+      position: fixed; inset: 0; z-index: 40;
+      background: rgba(0,0,0,0.60);
+      display: none; flex-direction: column;
+      align-items: center; justify-content: center; gap: 14px;
+      color: #fff; font-size: 14px;
+    }
+    .ring {
+      width: 48px; height: 48px;
+      border: 3px solid rgba(255,255,255,0.15);
+      border-top-color: var(--accent);
+      border-radius: 50%;
+      animation: spin 0.75s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* ═══════════════════════════════════════
+       Z-Index 20 — 바텀시트 (글래스모피즘)
+       position: fixed + backdrop-filter 로
+       배경(카메라/이미지) 을 실제로 블러 투과
+    ═══════════════════════════════════════ */
+    #bottom-sheet {
+      position: fixed; bottom: 0; left: 0; right: 0; z-index: 20;
+      height: var(--sheet-mini);
+      background: var(--glass-bg);
+      backdrop-filter: blur(20px);
+      -webkit-backdrop-filter: blur(20px);
+      border-radius: 24px 24px 0 0;
+      border: 1px solid var(--glass-border); border-bottom: none;
+      box-shadow: 0 -6px 32px rgba(0,0,0,0.55);
+      /* 핵심 애니메이션 */
+      transition: height 0.42s cubic-bezier(0.4, 0, 0.2, 1);
+      display: flex; flex-direction: column; overflow: hidden;
+    }
+    #bottom-sheet.expanded { height: var(--sheet-full); }
+
+    .handle {
+      width: 36px; height: 4px;
+      background: rgba(255,255,255,0.22);
+      border-radius: 2px;
+      margin: 10px auto 0; flex-shrink: 0;
+    }
+
+    /* 미니 상태 콘텐츠 */
+    #mini-content {
+      padding: 10px 20px;
+      font-size: 13px; color: rgba(255,255,255,0.45);
+      display: flex; align-items: center; gap: 8px;
+    }
+
+    /* 확장 상태 콘텐츠 */
+    #expanded-content {
+      display: none; flex: 1;
+      overflow-y: auto; overflow-x: hidden;
+      padding: 14px 20px 40px;
+      -webkit-overflow-scrolling: touch;
+    }
+    #bottom-sheet.expanded #mini-content     { display: none; }
+    #bottom-sheet.expanded #expanded-content { display: block; }
+
+    /* ── 시트 내부 스타일 ── */
+    .sec-label {
+      font-size: 11px; font-weight: 700;
+      color: rgba(255,255,255,0.40);
+      text-transform: uppercase; letter-spacing: 0.08em;
+      margin: 18px 0 8px;
+    }
+    .sec-label:first-child { margin-top: 2px; }
+    .divider { height: 1px; background: rgba(255,255,255,0.07); margin: 14px 0; }
+
+    .result-row {
+      display: flex; justify-content: space-between;
+      align-items: center; gap: 8px; margin-bottom: 8px;
+    }
+    #result-name { font-size: 18px; font-weight: 700; color: #fff; flex: 1; }
+    .result-pill-name { font-size: 15px; font-weight: 700; color: #fff; flex: 1; line-height: 1.3; }
+    .result-card { margin-bottom: 4px; }
+    .result-card + .divider { margin: 10px 0; }
+
+    .badge {
+      display: inline-block; padding: 4px 10px;
+      border-radius: 6px; font-size: 12px; font-weight: 700;
+      white-space: nowrap; flex-shrink: 0;
+    }
+    .badge-teal   { background: var(--teal);   color: #fff; }
+    .badge-orange { background: var(--orange); color: #fff; }
+    .badge-red    { background: var(--red);    color: #fff; }
+    .badge-green  { background: var(--green);  color: #fff; }
+
+    #conf-warning {
+      display: none; padding: 10px 12px;
+      border-radius: 10px; font-size: 13px; line-height: 1.5;
+      margin-bottom: 10px;
+    }
+
+    .hitl-btn {
+      background: rgba(255,255,255,0.08);
+      border: 1px solid rgba(255,255,255,0.14);
+      border-radius: 20px; color: rgba(255,255,255,0.75);
+      font-size: 12px; padding: 6px 14px; cursor: pointer;
+    }
+
+    .warn-item {
+      display: flex; gap: 10px; align-items: flex-start;
+      font-size: 13px; line-height: 1.55; color: var(--text);
+      margin-bottom: 9px;
+    }
+
+    /* 약국 목록 */
+    .pharmacy-row {
+      display: flex; justify-content: space-between; align-items: center;
+      padding: 9px 0;
+      border-bottom: 1px solid rgba(255,255,255,0.06);
+      font-size: 13px;
+    }
+    .ph-name  { font-weight: 600; color: #fff; }
+    .ph-dist  { font-size: 11px; color: rgba(255,255,255,0.38); margin-top: 2px; }
+
+    /* Leaflet 지도 */
+    #map {
+      width: 100%; height: 160px; border-radius: 12px;
+      margin-top: 12px; border: 1px solid var(--glass-border);
+      overflow: hidden;
+    }
+
+    /* ═══════════════════════════════════════
+       Z-Index 15 — 포커스 링
+    ═══════════════════════════════════════ */
+    #focus-ring {
+      position: fixed; z-index: 15; pointer-events: none;
+      width: 64px; height: 64px; border-radius: 50%;
+      border: 2px solid rgba(255,255,255,0.9);
+      transform: translate(-50%, -50%) scale(1.6);
+      opacity: 0;
+      transition: transform 0.22s ease, opacity 0.22s ease;
+    }
+    #focus-ring.show { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+    #focus-ring.lock { border-color: var(--accent); transform: translate(-50%, -50%) scale(0.85); opacity: 0; }
+
+    /* ═══════════════════════════════════════
+       Z-Index 35 — 카메라 오류 안내
+    ═══════════════════════════════════════ */
+    #cam-error {
+      position: fixed; inset: 0; z-index: 35;
+      display: none; flex-direction: column;
+      align-items: center; justify-content: center;
+      gap: 12px; text-align: center; padding: 40px;
+      background: rgba(0,0,0,0.75);
+    }
+    #cam-error .err-icon { font-size: 52px; }
+    #cam-error .err-title { font-size: 17px; font-weight: 700; color: #fff; }
+    #cam-error .err-msg   { font-size: 13px; color: rgba(255,255,255,0.55); line-height: 1.6; }
+    .btn-gallery {
+      background: var(--accent); color: #000;
+      padding: 12px 24px; border-radius: 12px;
+      font-weight: 700; font-size: 14px; cursor: pointer;
+      border: none; margin-top: 4px;
+    }
+
+    /* ═══════════════════════════════════════
+       Z-Index 50 — HITL 모달
+    ═══════════════════════════════════════ */
+    #hitl-modal {
+      position: fixed; inset: 0; z-index: 50;
+      background: rgba(0,0,0,0.65);
+      display: none; align-items: flex-end;
+    }
+    .modal-card {
+      width: 100%; background: #1C1C1E;
+      border-radius: 24px 24px 0 0;
+      border: 1px solid var(--glass-border);
+      padding: 20px 20px 40px;
+    }
+    .modal-card h3  { font-size: 16px; font-weight: 700; color: #fff; margin-bottom: 4px; }
+    .modal-card .sub { font-size: 13px; color: rgba(255,255,255,0.45); margin-bottom: 14px; }
+    #correction-sel {
+      width: 100%; background: rgba(255,255,255,0.07);
+      border: 1px solid var(--glass-border); border-radius: 10px;
+      color: #fff; padding: 12px; font-size: 14px; margin-bottom: 14px;
+    }
+    .modal-btns { display: flex; gap: 10px; }
+    .btn-primary {
+      flex: 1; padding: 14px; border-radius: 12px;
+      background: var(--accent); color: #000;
+      font-size: 15px; font-weight: 700; border: none; cursor: pointer;
+    }
+    .btn-cancel {
+      flex: 1; padding: 14px; border-radius: 12px;
+      background: rgba(255,255,255,0.08);
+      border: 1px solid var(--glass-border);
+      color: #fff; font-size: 15px; cursor: pointer;
+    }
+
+    /* ═══════════════════════════════════════
+       Toast
+    ═══════════════════════════════════════ */
+    #toast {
+      position: fixed; z-index: 60;
+      bottom: calc(var(--sheet-mini) + 14px);
+      left: 50%; transform: translateX(-50%) translateY(12px);
+      background: rgba(28,28,30,0.96);
+      color: #fff; padding: 10px 18px; border-radius: 20px;
+      font-size: 13px; white-space: nowrap;
+      border: 1px solid var(--glass-border);
+      opacity: 0; pointer-events: none;
+      transition: opacity 0.28s, transform 0.28s;
+    }
+    #toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+  </style>
+</head>
+<body>
+
+<!-- ── Z-Index 0: 배경 레이어 ── -->
+<div id="bg-layer">
+  <video id="video" autoplay playsinline muted></video>
+  <img  id="result-img" alt="추론 결과">
+</div>
+
+<!-- ── Z-Index 10: 레티클 (카메라 위에 진짜로 겹침) ── -->
+<div id="reticle-overlay">
+  <div id="reticle-box">
+    <span id="reticle-label">최대한 가까이, 흐리면 조금 멀리</span>
+  </div>
+</div>
+
+<!-- ── Z-Index 30: 플로팅 헤더 ── -->
+<div id="header">
+  <h3>💊 알약 인식</h3>
+  <div class="header-btns">
+    <label for="file-input" class="icon-btn" title="갤러리">🖼</label>
+    <button class="icon-btn" onclick="resetApp()" title="리셋">🔄</button>
+  </div>
+</div>
+
+<input type="file" id="file-input" accept="image/*" onchange="handleFile(this)">
+
+<!-- ── Z-Index 30: FAB (카메라 위에 떠있는 촬영 버튼) ── -->
+<button id="fab" onclick="captureNow()" aria-label="촬영">📷</button>
+
+<!-- ── Z-Index 40: 스피너 ── -->
+<div id="spinner">
+  <div class="ring"></div>
+  <span>YOLO 모델 추론 중...</span>
+</div>
+
+<!-- ── Z-Index 20: 바텀시트 (backdrop-filter가 배경을 실제로 블러) ── -->
+<div id="bottom-sheet">
+  <div class="handle"></div>
+
+  <!-- 미니 상태 -->
+  <div id="mini-content">📋 최근 검색 기록 없음</div>
+
+  <!-- 확장 상태 -->
+  <div id="expanded-content">
+
+    <div class="sec-label">인식 결과</div>
+    <div id="results-container"></div>
+
+    <div class="divider"></div>
+
+    <div class="sec-label">📍 근처 약국 (LBS)</div>
+    <div id="pharmacy-list">
+      <div style="font-size:13px;color:rgba(255,255,255,0.38)">위치 정보 로딩 중...</div>
+    </div>
+    <div id="map"></div>
+
+  </div>
+</div>
+
+<!-- ── Z-Index 15: 포커스 링 ── -->
+<div id="focus-ring"></div>
+
+<!-- ── Z-Index 35: 카메라 오류 ── -->
+<div id="cam-error">
+  <div class="err-icon">📷</div>
+  <div class="err-title">카메라 접근 불가</div>
+  <div class="err-msg">HTTPS 환경이 필요합니다.<br>ngrok URL로 접속하거나 갤러리 이미지를 사용하세요.</div>
+  <label for="file-input" class="btn-gallery">🖼 갤러리에서 선택</label>
+</div>
+
+<!-- ── Z-Index 50: HITL 모달 ── -->
+<div id="hitl-modal" onclick="onModalBg(event)">
+  <div class="modal-card" onclick="event.stopPropagation()">
+    <div class="handle" style="margin-bottom:14px"></div>
+    <h3>인식 결과 수정</h3>
+    <div class="sub" id="modal-ai-label">AI 예측: —</div>
+    <select id="correction-sel"></select>
+    <div class="modal-btns">
+      <button class="btn-cancel" onclick="closeHITL()">취소</button>
+      <button class="btn-primary" onclick="submitHITL()">제출</button>
+    </div>
+  </div>
+</div>
+
+<!-- Toast -->
+<div id="toast"></div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+// ────────────────────────────────────────────────────
+//  전역 상태
+// ────────────────────────────────────────────────────
+let state        = 'CAMERA';   // 'CAMERA' | 'PROCESSING' | 'RESULT'
+let stream       = null;
+let lastResult   = null;
+let leafMap      = null;
+
+// 2초 버퍼 관련
+let _bufferFrames    = [];   // [{variance, blob}]
+let _bufferSampleTid = null;
+let _bufferEndTid    = null;
+let _bufferCntTid    = null;
+const BUFFER_MS      = 2000;
+const SAMPLE_INTERVAL = 150; // 2초 동안 약 13프레임 수집
+
+const $ = id => document.getElementById(id);
+
+// 표시용 약품명 정리 — 괄호 안 내용 제거
+function cleanLabel(label) {
+  return label.replace(/\([^)]*\)/g, '').trim();
+}
+
+// ────────────────────────────────────────────────────
+//  부트
+// ────────────────────────────────────────────────────
+window.addEventListener('DOMContentLoaded', () => {
+  loadClasses();
+  initCamera();
+});
+
+async function loadClasses() {
+  try {
+    const data = await (await fetch('/model-info',
+      { headers: { 'ngrok-skip-browser-warning': 'true' } })).json();
+    const sel  = $('correction-sel');
+    Object.values(data.classes).forEach(name => {
+      const o = document.createElement('option');
+      o.value = o.textContent = name;
+      sel.appendChild(o);
+    });
+  } catch(e) { console.warn('model-info 실패', e); }
+}
+
+// ────────────────────────────────────────────────────
+//  카메라
+// ────────────────────────────────────────────────────
+async function initCamera() {
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: { ideal: 'environment' },
+               width: { ideal: 1280 }, height: { ideal: 720 } }
+    });
+    $('video').srcObject = stream;
+
+    // 연속 AF 명시 요청 (동영상 모드와 동일한 CAF)
+    const track = stream.getVideoTracks()[0];
+    const caps  = track.getCapabilities?.() ?? {};
+    if (caps.focusMode?.includes('continuous')) {
+      track.applyConstraints({ advanced: [{ focusMode: 'continuous' }] })
+           .catch(() => {});
+    }
+
+    setState('CAMERA');
+    setTimeout(focusOnReticle, 800);
+    setTimeout(startAutoCapture, 1200);
+  } catch(e) {
+    console.error('camera error', e);
+    $('cam-error').style.display = 'flex';
+    $('fab').style.display = 'none';
+    $('reticle-overlay').style.display = 'none';
+  }
+}
+
+// ────────────────────────────────────────────────────
+//  포커스 제어
+// ────────────────────────────────────────────────────
+let _focusTid = null;
+
+async function focusAt(pageX, pageY) {
+  // 포커스 링 애니메이션
+  const ring = $('focus-ring');
+  ring.style.left = pageX + 'px';
+  ring.style.top  = pageY + 'px';
+  ring.className  = 'show';
+  clearTimeout(_focusTid);
+  _focusTid = setTimeout(() => { ring.className = 'lock'; }, 500);
+  setTimeout(() => { ring.className = ''; }, 900);
+
+  if (!stream) return;
+  const track = stream.getVideoTracks()[0];
+  const caps  = track.getCapabilities?.() ?? {};
+  if (!caps.pointOfInterest) return; // 미지원 기기 — 무시
+
+  const vEl   = $('video');
+  const normX = Math.min(Math.max(pageX / vEl.clientWidth,  0), 1);
+  const normY = Math.min(Math.max(pageY / vEl.clientHeight, 0), 1);
+
+  try {
+    await track.applyConstraints({
+      advanced: [{ focusMode: 'single-shot', pointOfInterest: { x: normX, y: normY } }]
+    });
+  } catch(e) { /* 미지원 기기 무시 */ }
+}
+
+function focusOnReticle() {
+  const rect = $('reticle-box').getBoundingClientRect();
+  focusAt(rect.left + rect.width / 2, rect.top + rect.height / 2);
+}
+
+// 화면 탭 → 해당 지점 포커스
+$('bg-layer').addEventListener('click', e => {
+  if (state !== 'CAMERA') return;
+  focusAt(e.clientX, e.clientY);
+});
+$('bg-layer').addEventListener('touchend', e => {
+  if (state !== 'CAMERA') return;
+  const t = e.changedTouches[0];
+  focusAt(t.clientX, t.clientY);
+  e.preventDefault();
+}, { passive: false });
+
+// ────────────────────────────────────────────────────
+//  공통 유틸: 그레이스케일 변환 + Laplacian 분산
+// ────────────────────────────────────────────────────
+function toGray(data, len) {
+  const g = new Float32Array(len);
+  for (let i = 0; i < len; i++)
+    g[i] = data[i*4]*0.299 + data[i*4+1]*0.587 + data[i*4+2]*0.114;
+  return g;
+}
+
+function lapVariance(gray, w, h) {
+  let sum = 0, sum2 = 0, n = 0;
+  for (let y = 1; y < h-1; y++) for (let x = 1; x < w-1; x++) {
+    const l = -gray[(y-1)*w+x] - gray[(y+1)*w+x]
+              - gray[y*w+(x-1)] - gray[y*w+(x+1)]
+              + 4 * gray[y*w+x];
+    sum += l; sum2 += l*l; n++;
+  }
+  return n ? (sum2 - sum*sum/n) / n : 0;
+}
+
+// ────────────────────────────────────────────────────
+//  흐림 감지 (Laplacian 분산)
+// ────────────────────────────────────────────────────
+function isBlurry(canvas, threshold = 15) {
+  const ctx = canvas.getContext('2d');
+  const { data, width, height } = ctx.getImageData(0, 0, canvas.width, canvas.height);
+  return lapVariance(toGray(data, width * height), width, height) < threshold;
+}
+
+// ────────────────────────────────────────────────────
+//  자동 촬영 (vFlat 방식 — 안정화 감지)
+// ────────────────────────────────────────────────────
+let _autoCapTid   = null;
+let _stableCount  = 0;
+let _prevGray     = null;
+const STABLE_NEED = 3;    // 연속 N프레임 통과 시 버퍼 시작 (3×350ms ≈ 1초)
+const ANA_W = 80, ANA_H = 60;  // 분석용 다운샘플 크기
+
+function _cropReticleCanvas(targetW, targetH) {
+  const v       = $('video');
+  const reticle = $('reticle-box').getBoundingClientRect();
+  const vw = v.videoWidth || 1280, vh = v.videoHeight || 720;
+  const dw = v.clientWidth, dh = v.clientHeight;
+  const scale = Math.max(dw/vw, dh/vh);
+  const ox = (dw - vw*scale)/2, oy = (dh - vh*scale)/2;
+  const sx = Math.max(0, (reticle.left - ox)/scale);
+  const sy = Math.max(0, (reticle.top  - oy)/scale);
+  const sw = Math.min(reticle.width /scale, vw - sx);
+  const sh = Math.min(reticle.height/scale, vh - sy);
+  const c  = document.createElement('canvas');
+  c.width  = targetW; c.height = targetH;
+  c.getContext('2d').drawImage(v, sx, sy, sw, sh, 0, 0, targetW, targetH);
+  return c;
+}
+
+function analyzeFrame() {
+  if (state !== 'CAMERA') return;
+  const v = $('video');
+  if (!v.videoWidth) return;
+
+  const c   = _cropReticleCanvas(ANA_W, ANA_H);
+  const ctx = c.getContext('2d');
+  const { data } = ctx.getImageData(0, 0, ANA_W, ANA_H);
+  const gray     = toGray(data, ANA_W * ANA_H);
+  const sharpness = lapVariance(gray, ANA_W, ANA_H);
+
+  // 모션 점수: 이전 프레임과 평균 픽셀 차이
+  let motion = 0;
+  if (_prevGray) {
+    let diff = 0;
+    for (let i = 0; i < gray.length; i++) diff += Math.abs(gray[i] - _prevGray[i]);
+    motion = diff / gray.length;
+  }
+  _prevGray = gray;
+
+  // 모션 체크 제거 — 버퍼가 알아서 선명한 프레임 선택
+  const hasObject = sharpness > 18;
+
+  const box   = $('reticle-box');
+  const label = $('reticle-label');
+
+  if (hasObject) {
+    _stableCount++;
+    const t = Math.min(_stableCount / STABLE_NEED, 1);
+    box.style.borderColor = `rgba(${Math.round(255*(1-t))},${Math.round(200*t+55)},${Math.round(50*(1-t))},0.95)`;
+    box.style.boxShadow   = `0 0 0 9999px rgba(0,0,0,${0.40 - t*0.15})`;
+    label.textContent     = _stableCount >= STABLE_NEED
+      ? '✓ 인식 시작!'
+      : `알약 감지됨 ${'●'.repeat(_stableCount)}${'○'.repeat(STABLE_NEED - _stableCount)}`;
+
+    if (_stableCount >= STABLE_NEED) {
+      // 시각 피드백만 — 실제 촬영은 FAB 버튼으로만
+      label.textContent = '✓ 알약 감지됨 — 📷 버튼을 누르세요';
+    }
+  } else {
+    if (_stableCount > 0) {
+      _stableCount = 0;
+      box.style.borderColor = '';
+      box.style.boxShadow   = '';
+    }
+    label.textContent = '최대한 가까이, 흐리면 조금 멀리';
+  }
+}
+
+function startAutoCapture() {
+  _stableCount = 0; _prevGray = null;
+  if (!_autoCapTid) _autoCapTid = setInterval(analyzeFrame, 350);
+}
+
+function stopAutoCapture() {
+  clearInterval(_autoCapTid);
+  _autoCapTid = null;
+}
+
+// ────────────────────────────────────────────────────
+//  즉시 촬영 — FAB 버튼 (전체 프레임, 학습 조건과 동일)
+// ────────────────────────────────────────────────────
+function captureNow() {
+  const v = $('video');
+  if (!v.videoWidth) return;
+  const c = document.createElement('canvas');
+  c.width = v.videoWidth; c.height = v.videoHeight;
+  c.getContext('2d').drawImage(v, 0, 0);
+  c.toBlob(b => callPredict(b), 'image/jpeg', 0.92);
+}
+
+// ────────────────────────────────────────────────────
+//  2초 버퍼 — 가장 선명한 프레임 자동 선택
+// ────────────────────────────────────────────────────
+
+async function _captureFrame() {
+  const v = $('video');
+  if (!v.videoWidth) return null;
+
+  // 선명도 분석: 레티클 영역 다운샘플
+  const ana = _cropReticleCanvas(ANA_W, ANA_H);
+  const { data } = ana.getContext('2d').getImageData(0, 0, ANA_W, ANA_H);
+  const variance = lapVariance(toGray(data, ANA_W * ANA_H), ANA_W, ANA_H);
+
+  // 전송용: 전체 프레임 (학습 조건과 동일)
+  const c = document.createElement('canvas');
+  c.width = v.videoWidth; c.height = v.videoHeight;
+  c.getContext('2d').drawImage(v, 0, 0);
+
+  return new Promise(res =>
+    c.toBlob(blob => res({ variance, blob }), 'image/jpeg', 0.92)
+  );
+}
+
+function startFrameBuffer() {
+  if (state === 'PROCESSING' || state === 'RESULT') return;
+  _bufferFrames = [];
+  stopAutoCapture();
+  $('fab').style.display = 'none';
+
+  const box = $('reticle-box'), label = $('reticle-label');
+  box.style.borderColor = 'rgba(255,200,0,0.92)';
+
+  let elapsed = 0;
+  label.textContent = '최적 프레임 수집 중 2.0s';
+  _bufferCntTid = setInterval(() => {
+    elapsed += 100;
+    const rem = Math.max(0, (BUFFER_MS - elapsed) / 1000).toFixed(1);
+    label.textContent = elapsed < BUFFER_MS
+      ? `최적 프레임 수집 중 ${rem}s`
+      : '최선 프레임 선택 중...';
+  }, 100);
+
+  _bufferSampleTid = setInterval(async () => {
+    const f = await _captureFrame();
+    if (f) _bufferFrames.push(f);
+  }, SAMPLE_INTERVAL);
+
+  _bufferEndTid = setTimeout(_pickAndSend, BUFFER_MS);
+}
+
+function _pickAndSend() {
+  clearInterval(_bufferSampleTid);
+  clearInterval(_bufferCntTid);
+  $('reticle-box').style.borderColor = '';
+  $('reticle-label').textContent = '최대한 가까이, 흐리면 조금 멀리';
+
+  if (!_bufferFrames.length) {
+    $('fab').style.display = 'flex';
+    startAutoCapture();
+    return;
+  }
+
+  const best = _bufferFrames.reduce((a, b) => b.variance > a.variance ? b : a);
+  console.log(`[Buffer] ${_bufferFrames.length}프레임 중 최선 variance=${best.variance.toFixed(1)}`);
+  _bufferFrames = [];
+  callPredict(best.blob);
+}
+
+function stopFrameBuffer() {
+  clearInterval(_bufferSampleTid);
+  clearTimeout(_bufferEndTid);
+  clearInterval(_bufferCntTid);
+  _bufferFrames = [];
+  $('reticle-box').style.borderColor = '';
+  $('reticle-label').textContent = '최대한 가까이, 흐리면 조금 멀리';
+}
+
+function handleFile(input) {
+  if (!input.files?.[0]) return;
+  callPredict(input.files[0]);
+  input.value = '';
+}
+
+// ────────────────────────────────────────────────────
+//  API
+// ────────────────────────────────────────────────────
+async function callPredict(blob) {
+  setState('PROCESSING');
+  const fd = new FormData();
+  fd.append('file', blob, 'image.jpg');
+  try {
+    const res = await fetch('/predict', { method: 'POST', body: fd,
+      headers: { 'ngrok-skip-browser-warning': 'true' } });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    applyResult(await res.json());
+  } catch(e) {
+    console.error(e);
+    showToast('⚠️ 서버 연결 오류');
+    setState('CAMERA');
+  }
+}
+
+// ────────────────────────────────────────────────────
+//  결과 렌더링
+// ────────────────────────────────────────────────────
+function applyResult(data) {
+  lastResult = data;
+  $('result-img').src = 'data:image/jpeg;base64,' + data.image_b64;
+
+  const preds = data.predictions;
+  const container = $('results-container');
+  container.innerHTML = '';
+
+  if (!preds || preds.length === 0) {
+    container.innerHTML = `
+      <div style="background:rgba(220,20,60,.15);border:1px solid rgba(220,20,60,.3);
+                  border-radius:10px;padding:12px;font-size:13px;margin-bottom:8px">
+        <span class="badge badge-red">인식 실패</span>&nbsp;&nbsp;알약을 인식하지 못했습니다. 다시 촬영해 주세요.
+      </div>`;
+    setState('RESULT');
+    fetchGPS();
+    return;
+  }
+
+  preds.forEach((pred, idx) => {
+    const conf      = Math.round(pred.confidence * 100);
+    const confClass = conf >= 85 ? 'badge-teal' : conf >= 50 ? 'badge-orange' : 'badge-red';
+    const info      = pred.pill_info || {};
+
+    // 저신뢰도 경고
+    let confWarnHTML = '';
+    if (conf < 50) {
+      confWarnHTML = `<div style="background:rgba(220,20,60,.12);border:1px solid rgba(220,20,60,.25);
+                         border-radius:8px;padding:7px 10px;font-size:12px;margin:5px 0">
+        <span class="badge badge-red" style="font-size:10px">신뢰도 낮음</span>&nbsp;다시 촬영 권장
+      </div>`;
+    } else if (conf < 85) {
+      confWarnHTML = `<div style="background:rgba(255,140,0,.12);border:1px solid rgba(255,140,0,.25);
+                         border-radius:8px;padding:7px 10px;font-size:12px;margin:5px 0">
+        <span class="badge badge-orange" style="font-size:10px">저신뢰도</span>&nbsp;전문가 확인 권장
+      </div>`;
+    }
+
+    // 복약 가이드
+    let infoHTML = '';
+    if (info.warning) {
+      infoHTML += `<div class="warn-item">
+        <span class="badge badge-red" style="flex-shrink:0;font-size:11px">병용금기</span>
+        <span style="font-size:12px">${info.warning}</span>
+      </div>`;
+    }
+    if (info.caution) {
+      infoHTML += `<div class="warn-item">
+        <span class="badge badge-orange" style="flex-shrink:0;font-size:11px">복약주의</span>
+        <span style="font-size:12px">${info.caution}</span>
+      </div>`;
+    }
+    if (!infoHTML) {
+      infoHTML = `<div style="font-size:12px;color:rgba(255,255,255,0.35);margin:4px 0">등록된 복약 정보 없음</div>`;
+    }
+
+    const divider = idx < preds.length - 1 ? '<div class="divider"></div>' : '';
+
+    container.innerHTML += `
+      <div class="result-card">
+        <div class="result-row">
+          <span class="result-pill-name">${cleanLabel(pred.label)}</span>
+          <span class="badge ${confClass}">AI ${conf}%</span>
+        </div>
+        ${confWarnHTML}
+        <button class="hitl-btn" style="margin:5px 0 6px" onclick="openHITL(${idx})">이 알약이 맞나요? ↗</button>
+        <div class="sec-label" style="margin:6px 0 5px">⚠️ 복약 가이드</div>
+        ${infoHTML}
+      </div>
+      ${divider}`;
+  });
+
+  // HITL 모달 기본값 = 첫 번째 결과
+  openHITL(0, false);
+
+  setState('RESULT');
+  fetchGPS();
+}
+
+// ────────────────────────────────────────────────────
+//  상태 전환
+// ────────────────────────────────────────────────────
+function setState(s) {
+  state = s;
+  const video = $('video'), img = $('result-img'),
+        ret = $('reticle-overlay'), fab = $('fab'),
+        spin = $('spinner'), sheet = $('bottom-sheet');
+
+  if (s === 'CAMERA') {
+    video.style.display = 'block'; img.style.display = 'none';
+    ret.style.display   = 'flex';  fab.style.display = 'flex';
+    spin.style.display  = 'none';
+    sheet.style.height  = '';
+    sheet.classList.remove('expanded');
+
+  } else if (s === 'PROCESSING') {
+    stopAutoCapture(); stopFrameBuffer();
+    fab.style.display  = 'none';  ret.style.display = 'none';
+    spin.style.display = 'flex';
+
+  } else if (s === 'RESULT') {
+    stopAutoCapture(); stopFrameBuffer();
+    video.style.display = 'none'; img.style.display = 'block';
+    ret.style.display   = 'none'; fab.style.display = 'none';
+    spin.style.display  = 'none';
+    requestAnimationFrame(() => { sheet.style.height = ''; sheet.classList.add('expanded'); });
+    // 배터리 절약 — 카메라 스트림 중단
+    stream?.getTracks().forEach(t => t.stop());
+    stream = null;
+  }
+}
+
+function resetApp() {
+  stopFrameBuffer();
+  lastResult = null;
+  $('result-img').src = '';
+  $('pharmacy-list').innerHTML = '<div style="font-size:13px;color:rgba(255,255,255,0.38)">위치 정보 로딩 중...</div>';
+  $('map').innerHTML = '';
+  if (leafMap) { leafMap.remove(); leafMap = null; }
+  initCamera();
+}
+
+// ────────────────────────────────────────────────────
+//  GPS + 약국 + Leaflet 지도
+// ────────────────────────────────────────────────────
+function fetchGPS() {
+  if (!navigator.geolocation) { fallbackPharmacy(37.5665, 126.9780); return; }
+  navigator.geolocation.getCurrentPosition(
+    p => { initMap(p.coords.latitude, p.coords.longitude);
+           queryPharmacies(p.coords.latitude, p.coords.longitude); },
+    () => fallbackPharmacy(37.5665, 126.9780),
+    { timeout: 8000, maximumAge: 60000 }
+  );
+}
+
+function initMap(lat, lng) {
+  if (leafMap) { leafMap.remove(); }
+  leafMap = L.map('map', { zoomControl: false }).setView([lat, lng], 16);
+  // CartoDB Dark Matter — 무료, API 키 불필요, 다크 테마
+  L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+    attribution: '© OpenStreetMap © CARTO', maxZoom: 19
+  }).addTo(leafMap);
+  L.circleMarker([lat, lng], {
+    radius: 8, fillColor: '#00C897', color: '#fff', weight: 2, fillOpacity: 1
+  }).addTo(leafMap).bindPopup('현재 위치');
+}
+
+async function queryPharmacies(lat, lng) {
+  // Overpass API — OpenStreetMap 실제 약국 데이터, 무료
+  const q = `[out:json][timeout:10];node["amenity"="pharmacy"](around:600,${lat},${lng});out 5;`;
+  try {
+    const data = await (await fetch('https://overpass-api.de/api/interpreter',
+      { method: 'POST', body: q })).json();
+    const items = data.elements.slice(0, 4);
+    if (!items.length) { fallbackPharmacy(lat, lng); return; }
+    renderPharmacies(items, lat, lng);
+    items.forEach(p => {
+      if (!p.lat || !p.lon) return;
+      L.marker([p.lat, p.lon], {
+        icon: L.divIcon({ html: '💊', className: '', iconSize: [22,22] })
+      }).addTo(leafMap).bindPopup(p.tags?.name || '약국');
+    });
+  } catch(e) { fallbackPharmacy(lat, lng); }
+}
+
+function haversine(lat1, lng1, lat2, lng2) {
+  const R = 6371000, d2r = Math.PI / 180;
+  const dLat = (lat2-lat1)*d2r, dLng = (lng2-lng1)*d2r;
+  const a = Math.sin(dLat/2)**2
+          + Math.cos(lat1*d2r)*Math.cos(lat2*d2r)*Math.sin(dLng/2)**2;
+  return Math.round(2*R*Math.atan2(Math.sqrt(a), Math.sqrt(1-a)));
+}
+
+function renderPharmacies(items, uLat, uLng) {
+  $('pharmacy-list').innerHTML = items.map(p => {
+    const name   = p.tags?.name || '약국';
+    const m      = (p.lat && p.lon) ? haversine(uLat, uLng, p.lat, p.lon) : null;
+    const dist   = m != null ? (m < 1000 ? `${m}m` : `${(m/1000).toFixed(1)}km`) : '—';
+    const isOpen = Math.random() > 0.3; // OSM opening_hours 파싱 생략 — 데모용 랜덤
+    return `<div class="pharmacy-row">
+      <div><div class="ph-name">${name}</div><div class="ph-dist">${dist} 거리</div></div>
+      <span class="badge ${isOpen ? 'badge-green' : 'badge-red'}">${isOpen ? '영업 중' : '영업 종료'}</span>
+    </div>`;
+  }).join('');
+}
+
+function fallbackPharmacy(lat, lng) {
+  initMap(lat, lng);
+  $('pharmacy-list').innerHTML = `
+    <div class="pharmacy-row">
+      <div><div class="ph-name">달빛정성약국</div><div class="ph-dist">120m 거리</div></div>
+      <span class="badge badge-green">영업 중</span>
+    </div>
+    <div class="pharmacy-row">
+      <div><div class="ph-name">중앙사랑약국</div><div class="ph-dist">340m 거리</div></div>
+      <span class="badge badge-red">영업 종료</span>
+    </div>`;
+}
+
+// ────────────────────────────────────────────────────
+//  HITL 모달
+// ────────────────────────────────────────────────────
+function openHITL(idx = 0, show = true) {
+  const pred = lastResult?.predictions?.[idx];
+  if (pred) {
+    const conf = Math.round(pred.confidence * 100);
+    const sel  = $('correction-sel');
+    for (let i = 0; i < sel.options.length; i++) {
+      if (sel.options[i].value === pred.label) { sel.selectedIndex = i; break; }
+    }
+    $('modal-ai-label').textContent    = `AI 예측: ${cleanLabel(pred.label)} (${conf}%)`;
+    $('hitl-modal').dataset.predIdx    = idx;
+  }
+  if (show) $('hitl-modal').style.display = 'flex';
+}
+function closeHITL() { $('hitl-modal').style.display = 'none'; }
+function onModalBg(e){ if (e.target === $('hitl-modal')) closeHITL(); }
+
+async function submitHITL() {
+  const idx  = parseInt($('hitl-modal').dataset.predIdx || '0');
+  const pred = lastResult?.predictions?.[idx];
+  const ai   = pred?.label       || '';
+  const conf = pred?.confidence  || 0;
+  const fix  = $('correction-sel').value;
+  try {
+    await fetch('/hitl', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json',
+                 'ngrok-skip-browser-warning': 'true' },
+      body: JSON.stringify({
+        ai_label: ai, corrected_label: fix,
+        confidence: conf, timestamp: new Date().toISOString()
+      })
+    });
+    closeHITL();
+    showToast('✅ HITL 데이터로 격리되었습니다.');
+  } catch(e) { showToast('⚠️ 저장 실패'); }
+}
+
+// ────────────────────────────────────────────────────
+//  바텀시트 드래그 (손가락으로 올리고 내리기)
+// ────────────────────────────────────────────────────
+(function() {
+  const sheet  = $('bottom-sheet');
+  const handle = sheet.querySelector('.handle');
+
+  const MINI = () => window.innerHeight * 0.15;
+  const FULL = () => window.innerHeight * 0.58;
+
+  let dragging = false, startY = 0, startH = 0;
+
+  function dragStart(y) {
+    startY = y; startH = sheet.offsetHeight; dragging = true;
+    sheet.style.transition = 'none';
+  }
+  function dragMove(y) {
+    if (!dragging) return;
+    const h = Math.min(Math.max(startH + (startY - y), MINI()), FULL());
+    sheet.style.height = h + 'px';
+  }
+  function dragEnd() {
+    if (!dragging) return;
+    dragging = false;
+    sheet.style.transition = '';
+    const h = sheet.offsetHeight, mid = (MINI() + FULL()) / 2;
+    if (h > mid) {
+      sheet.style.height = FULL() + 'px';
+      sheet.classList.add('expanded');
+    } else {
+      sheet.style.height = MINI() + 'px';
+      sheet.classList.remove('expanded');
+    }
+  }
+
+  handle.addEventListener('touchstart',  e => dragStart(e.touches[0].clientY), { passive: true });
+  document.addEventListener('touchmove', e => { if (dragging) { e.preventDefault(); dragMove(e.touches[0].clientY); } }, { passive: false });
+  document.addEventListener('touchend',  dragEnd);
+
+  handle.addEventListener('mousedown', e => { dragStart(e.clientY); e.preventDefault(); });
+  document.addEventListener('mousemove', e => dragMove(e.clientY));
+  document.addEventListener('mouseup',  dragEnd);
+})();
+
+// ────────────────────────────────────────────────────
+//  Toast
+// ────────────────────────────────────────────────────
+let _tt = null;
+function showToast(msg) {
+  const t = $('toast');
+  t.textContent = msg;
+  t.classList.add('show');
+  if (_tt) clearTimeout(_tt);
+  _tt = setTimeout(() => t.classList.remove('show'), 3000);
+}
+</script>
+</body>
+</html>

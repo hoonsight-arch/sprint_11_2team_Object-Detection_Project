@@ -1,0 +1,745 @@
+# streamlit_app.py
+import streamlit as st
+import time
+import numpy as np
+from PIL import Image
+
+def apply_glassmorphism_css():
+    """제안서 스펙에 맞춘 다크모드, 글래스모피즘 및 카메라 위 레티클 가이드라인 박스 구현"""
+    start_time = time.time()
+    st.markdown(
+        """
+        <style>
+        /* 메인 앱 배경 다크화 */
+        .stApp {
+            background-color: #121212;
+            color: #E0E0E0;
+        }
+        
+        /* 카메라 컴포넌트를 감싸는 컨테이너를 상대 위치로 지정 */
+        div[data-testid="stCameraInput"] {
+            position: relative;
+        }
+        
+        /* 카메라 프리뷰 화면 중앙에 강제로 네모 박스(Reticle) 주입 */
+        div[data-testid="stCameraInput"]::after {
+            content: "";
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            width: 260px;
+            height: 200px;
+            border: 3px dashed #00FFCD;
+            border-radius: 15px;
+            box-shadow: 0 0 15px rgba(0, 255, 205, 0.3);
+            pointer-events: none;
+            z-index: 99;
+        }
+        
+        /* Z-Index 2 정보 레이어를 대변하는 글래스모피즘 컨테이너 스펙 */
+        .glass-card {
+            background: rgba(255, 255, 255, 0.05);
+            backdrop-filter: blur(10px);
+            -webkit-backdrop-filter: blur(10px);
+            border-radius: 20px;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            padding: 20px;
+            margin-top: 15px;
+        }
+        
+        /* 맥락적 색상 코드 배지 스타일링 */
+        .badge-teal { background-color: #008080; color: white; padding: 3px 8px; border-radius: 5px; font-size: 14px; font-weight: bold; }
+        .badge-orange { background-color: #FF8C00; color: white; padding: 3px 8px; border-radius: 5px; font-size: 14px; font-weight: bold; }
+        .badge-red { background-color: #DC143C; color: white; padding: 3px 8px; border-radius: 5px; font-size: 14px; font-weight: bold; }
+        .badge-green { background-color: #2E7D32; color: white; padding: 3px 8px; border-radius: 5px; font-size: 14px; font-weight: bold; }
+        </style>
+        """,
+        unsafe_allow_html=True
+    )
+    print(f"[LOG] CSS 스타일 및 오버레이 레이어 주입 완료 소요 시간: {time.time() - start_time:.4f}초")
+
+def run_app():
+    print("\n--- [LOG] Streamlit 스크립트 실행 시작 (Rerun Triggered) ---")
+    global_start = time.time()
+    
+    # 💡 [방어벽 추가] 부모 계층에서 model_wrapper 누락/초기화 타이밍이 꼬였을 경우 자식 앱에서 즉시 자동 구제
+    if "model_wrapper" not in st.session_state:
+        print("[LOG] ⚠️ 자식 앱에서 model_wrapper 누락 감지! 강제 초기화를 실행합니다.")
+        from app_wrapper import load_yolo_model_cached
+        st.session_state.model_wrapper = load_yolo_model_cached()
+        
+    st.sidebar.markdown("### 🛠️ 디버그 제어 플래그")
+    if "debug_skip_inference" not in st.session_state:
+        st.session_state.debug_skip_inference = False
+
+    st.session_state.debug_skip_inference = st.sidebar.checkbox(
+        "AI 연산 및 드로잉 완전히 생략 (고속 절환 테스트)",
+        value=st.session_state.debug_skip_inference
+    )
+
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("### 🤖 로드된 모델 정보")
+    try:
+        yolo_model = st.session_state.model_wrapper.model
+        st.sidebar.success("✅ 모델 로드 완료")
+        st.sidebar.markdown(f"**타입:** `{type(yolo_model).__name__}`")
+        st.sidebar.markdown(f"**가중치:** `{yolo_model.ckpt_path}`")
+        class_names = yolo_model.names
+        st.sidebar.markdown(f"**클래스 수:** {len(class_names)}개")
+        with st.sidebar.expander("클래스 목록 보기"):
+            for idx, name in class_names.items():
+                st.write(f"`{idx}` {name}")
+    except Exception as e:
+        st.sidebar.error(f"모델 정보 로드 실패: {e}")
+    
+    apply_glassmorphism_css()
+    
+    col_nav1, col_nav2 = st.columns([8, 2])
+    with col_nav1:
+        st.markdown("<h3 style='margin:0;'>💊 알약 인식 통합 시스템</h3>", unsafe_allow_html=True)
+    with col_nav2:
+        if st.button("🔄 리셋"):
+            print("[LOG] 사용자가 시스템 리셋을 요청했습니다.")
+            st.session_state.step = "CAMERA_INPUT"
+            st.session_state.captured_img = None
+            st.session_state.feedback_submitted = False
+            if "inference_image" in st.session_state: del st.session_state.inference_image
+            if "inference_data" in st.session_state: del st.session_state.inference_data
+            st.rerun()
+
+    st.markdown("---")
+
+    # ==========================================
+    # [상태 1] 입력 방식 선택 (카메라 촬영 VS 파일 업로드)
+    # ==========================================
+    if st.session_state.step == "CAMERA_INPUT":
+        print("[LOG] 현재 상태: CAMERA_INPUT (사용자 입력 방식 선택 대기)")
+        
+        tab_cam, tab_file = st.tabs(["📸 카메라로 촬영", "📁 갤러리 파일 선택"])
+        
+        with tab_cam:
+            st.markdown("#### [Z-Index 0] 풀스크린 뷰파인더 가이드라인")
+            st.info("초록색 네모 점선(Reticle) 안에 알약을 맞춘 뒤 촬영 버튼을 눌러주세요.")
+            
+            cam_start = time.time()
+            captured_file = st.camera_input("카메라 프리뷰 영역", label_visibility="collapsed")
+            print(f"[LOG] 카메라 컴포넌트 렌더링 소요 시간: {time.time() - cam_start:.4f}초")
+            
+            if captured_file:
+                print("[LOG] 카메라 촬영 성공. AI 분석 단계로 진입합니다.")
+                st.session_state.captured_img = captured_file
+                st.session_state.step = "AI_ANALYSIS"
+                st.rerun()
+                
+        with tab_file:
+            st.markdown("#### [Z-Index 0] 파일 업로더 계층")
+            st.info("알약이 잘 촬영된 사진 파일(png, jpg, jpeg)을 선택해 주세요.")
+            
+            file_start = time.time()
+            uploaded_file = st.file_uploader(
+                "알약 이미지 파일 선택", 
+                type=["png", "jpg", "jpeg"], 
+                label_visibility="collapsed"
+            )
+            print(f"[LOG] 파일 업로더 컴포넌트 렌더링 소요 시간: {time.time() - file_start:.4f}초")
+            
+            if uploaded_file:
+                print("[LOG] 파일 업로드 성공. AI 분석 단계로 진입합니다.")
+                st.session_state.captured_img = uploaded_file
+                st.session_state.step = "AI_ANALYSIS"
+                st.rerun()
+
+    # ==========================================
+    # [상태 2 & 3] 실제 YOLO 추론 및 결과 레이어 출력 단계
+    # ==========================================
+    elif st.session_state.step in ["AI_ANALYSIS", "EXPANDED_INFO"]:
+        print(f"[LOG] 현재 상태: {st.session_state.step}")
+        
+        # 1. AI 백엔드 추론 연산 (AI_ANALYSIS)
+        if st.session_state.step == "AI_ANALYSIS":
+            if st.session_state.debug_skip_inference:
+                print("[LOG] [FLAG_ON] 디버그 모드로 인해 실제 YOLO 추론을 생략합니다.")
+                st.session_state.inference_image = Image.open(st.session_state.captured_img)
+                st.session_state.inference_data = []
+            else:
+                inference_start = time.time()
+                with st.spinner("YOLO 모델이 알약을 실시간 추론 중입니다..."):
+                    # 💡 파일 업로더나 카메라 컴포넌트에서 받아온 이미지 바이너리 데이터 추출
+                    image_bytes = st.session_state.captured_img.getvalue()
+                    
+                    # 💡 app_wrapper에 상주해있는 진짜 YOLO Predictor 호출 (계약 준수)
+                    refined_output, processed_img_rgb = st.session_state.model_wrapper.predict(image_bytes)
+                    
+                    # 결과를 세션에 영구 보존하여 Rerun 시 소실 방지
+                    st.session_state.inference_image = processed_img_rgb
+                    st.session_state.inference_data = refined_output
+                    
+                print(f"[LOG] 실제 YOLO AI 모델 추론 최종 소요 시간: {time.time() - inference_start:.4f}초")
+                
+            st.session_state.step = "EXPANDED_INFO"
+            st.rerun()
+            
+        # 2. [Z-Index 1] YOLO Bounding Box 추론 결과 이미지 노출
+        img_render_start = time.time()
+        st.image(
+            st.session_state.inference_image, 
+            caption="Vision AI 핵심 계층: YOLO Bounding Box 실시간 추론 결과", 
+            use_container_width=True
+        )
+        print(f"[LOG] 추론 완료 이미지 렌더링 소요 시간: {time.time() - img_render_start:.4f}초")
+        
+        # 3. 데이터 파싱 (YOLO가 인식한 라벨과 신뢰도 동적 연동)
+        recognized_name = "인식 불가 (알 수 없는 알약)"
+        confidence_text = "0%"
+        
+        if st.session_state.inference_data:
+            # 가장 신뢰도(Confidence)가 높은 첫 번째 감지 오브젝트 정보 추출
+            top_prediction = st.session_state.inference_data[0]
+            recognized_name = top_prediction["label"]
+            confidence_text = f"{int(top_prediction['confidence'] * 100)}%"
+        elif st.session_state.debug_skip_inference:
+            recognized_name = "타이레놀정 500mg [디버그 모드]"
+            confidence_text = "98%"
+
+        # 4. [Z-Index 2] 정보 레이어 (글래스모피즘 바텀시트 컨테이너 전개)
+        card_start = time.time()
+        st.markdown('<div class="glass-card">', unsafe_allow_html=True)
+        
+        # --- 위계 1: 실시간 인식 결과 및 신뢰도 배지 + 피드백 루프 은닉 버튼 ---
+        res_col1, res_col2 = st.columns([7, 3])
+        with res_col1:
+            st.markdown(f"### **{recognized_name}** <span class='badge-teal'>AI 확신도 {confidence_text}</span>", unsafe_allow_html=True)
+        with res_col2:
+            if st.button("이 알약이 맞나요?", key="hitl_btn"):
+                st.session_state.feedback_submitted = True
+        
+        if st.session_state.feedback_submitted:
+            st.toast("전문가 개입(HITL) 데이터로 격리되었습니다.")
+            
+        st.markdown("<hr style='margin:10px 0; border:0.5px solid rgba(255,255,255,0.1);'>", unsafe_allow_html=True)
+        
+        # --- 위계 2: Domain Data 기반 치명적 경고/주의 조치 ---
+        st.markdown("#### ⚠️ 복약 가이드 및 위험 경고")
+        st.markdown("- <span class='badge-red'>치명적 경고</span> **병용금기:** 특정 소염진통제와 동시 복용 금지", unsafe_allow_html=True)
+        st.markdown("- <span class='badge-orange'>주의 조치</span> **섭취 안내:** 음식물과 복용 시 흡수율 저하 가능성", unsafe_allow_html=True)
+        
+        st.markdown("<hr style='margin:10px 0; border:0.5px solid rgba(255,255,255,0.1);'>", unsafe_allow_html=True)
+        
+        # --- 위계 3: LBS 위치 기반 근처 약국 정보 및 지도 영역 ---
+        st.markdown("#### 📍 근처 약국 위치 및 영업 상태 (LBS)")
+        st.markdown("• **달빛정성약국** (거리 120m) — <span class='badge-green'>영업 중</span>")
+        
+        st.components.v1.html(
+            """
+            <div style="background-color: #242424; color: #999999; height: 120px; 
+                        display: flex; flex-direction:column; align-items: center; justify-content: center; 
+                        border-radius: 12px; border: 1px solid rgba(255,255,255,0.1); font-size:14px;">
+                🗺️ [네이버 지도 Iframe 영역]
+            </div>
+            """,
+            height=130
+        )
+        st.markdown('</div>', unsafe_allow_html=True)
+        print(f"[LOG] 하단 글래스모피즘 정보 레이어 출력 소요 시간: {time.time() - card_start:.4f}초")
+
+    print(f"[LOG] 1회 사이클 전체 스크립트 실행 완료 순수 소요 시간: {time.time() - global_start:.4f}초")
+    print("-------------------------------------------------------------------\n")
+    
+
+# # streamlit_app.py
+# import streamlit as st
+# import time
+# from PIL import Image, ImageDraw
+
+# def apply_glassmorphism_css():
+#     """제안서 스펙에 맞춘 다크모드, 글래스모피즘 및 ★카메라 위 레티클 가이드라인 박스 구현★"""
+#     start_time = time.time()
+#     st.markdown(
+#         """
+#         <style>
+#         /* 메인 앱 배경 다크화 */
+#         .stApp {
+#             background-color: #121212;
+#             color: #E0E0E0;
+#         }
+        
+#         /* [핵심 추가] 카메라 컴포넌트를 감싸는 컨테이너를 상대 위치로 지정 */
+#         div[data-testid="stCameraInput"] {
+#             position: relative;
+#         }
+        
+#         /* [핵심 추가] 카메라 프리뷰 화면 중앙에 강제로 네모 박스(Reticle) 주입 */
+#         div[data-testid="stCameraInput"]::after {
+#             content: "";
+#             position: absolute;
+#             top: 50%;
+#             left: 50%;
+#             transform: translate(-50%, -50%);
+#             width: 260px;  /* 알약이 들어갈 네모 박스 가로 크기 */
+#             height: 200px; /* 알약이 들어갈 네모 박스 세로 크기 */
+#             border: 3px dashed #00FFCD; /* 테일/초록 계열의 점선 테두리 */
+#             border-radius: 15px;
+#             box-shadow: 0 0 15px rgba(0, 255, 205, 0.3); /* 은은한 네온 효과 */
+#             pointer-events: none; /* 이 박스 때문에 뒤의 촬영 버튼이 안 눌리는 현상 방지 */
+#             z-index: 99; /* 카메라 화면보다 무조건 위에 배치 */
+#         }
+        
+#         /* Z-Index 2 정보 레이어를 대변하는 글래스모피즘 컨테이너 스펙 */
+#         .glass-card {
+#             background: rgba(255, 255, 255, 0.05);
+#             backdrop-filter: blur(10px);
+#             -webkit-backdrop-filter: blur(10px);
+#             border-radius: 20px;
+#             border: 1px solid rgba(255, 255, 255, 0.1);
+#             padding: 20px;
+#             margin-top: 15px;
+#         }
+        
+#         /* 맥락적 색상 코드 배지 스타일링 */
+#         .badge-teal { background-color: #008080; color: white; padding: 3px 8px; border-radius: 5px; font-size: 14px; font-weight: bold; }
+#         .badge-orange { background-color: #FF8C00; color: white; padding: 3px 8px; border-radius: 5px; font-size: 14px; font-weight: bold; }
+#         .badge-red { background-color: #DC143C; color: white; padding: 3px 8px; border-radius: 5px; font-size: 14px; font-weight: bold; }
+#         .badge-green { background-color: #2E7D32; color: white; padding: 3px 8px; border-radius: 5px; font-size: 14px; font-weight: bold; }
+#         </style>
+#         """,
+#         unsafe_allow_html=True
+#     )
+#     print(f"[LOG] CSS 및 레티클 박스 주입 완료 소요 시간: {time.time() - start_time:.4f}초")
+
+# def simulate_yolo_resnet_inference(image_file):
+#     """YOLO+ResNet 하이브리드 추론 및 가이드라인 자동 크롭/Bounding Box 시각화 가상 구현"""
+#     start_time = time.time()
+#     img = Image.open(image_file)
+#     width, height = img.size
+    
+#     draw_start = time.time()
+#     draw = ImageDraw.Draw(img)
+#     # 찰칵 찍은 뒤 결과 이미지 위에 그려질 선언 (실제 추론 박스 크기)
+#     start_point = (int(width * 0.35), int(height * 0.35))
+#     end_point = (int(width * 0.65), int(height * 0.65))
+    
+#     draw.rectangle([start_point, end_point], outline="#00FFCD", width=8)
+#     print(f"[LOG] Vision AI 전체 연산 최종 소요 시간: {time.time() - start_time:.4f}초")
+#     return img
+
+# def run_app():
+#     print("\n--- [LOG] Streamlit 스크립트 실행 시작 (Rerun Triggered) ---")
+#     global_start = time.time()
+    
+#     st.sidebar.markdown("### 🛠️ 디버그 제어 플래그")
+#     if "debug_skip_inference" not in st.session_state:
+#         st.session_state.debug_skip_inference = False
+        
+#     st.session_state.debug_skip_inference = st.sidebar.checkbox(
+#         "AI 연산 및 드로잉 완전히 생략 (고속 절환 테스트)", 
+#         value=st.session_state.debug_skip_inference
+#     )
+    
+#     # 레티클 스타일이 포함된 CSS 주입
+#     apply_glassmorphism_css()
+    
+#     col_nav1, col_nav2 = st.columns([8, 2])
+#     with col_nav1:
+#         st.markdown("<h3 style='margin:0;'>💊 알약 인식 통합 시스템</h3>", unsafe_allow_html=True)
+#     with col_nav2:
+#         if st.button("🔄 리셋"):
+#             st.session_state.step = "CAMERA_INPUT"
+#             st.session_state.captured_img = None
+#             st.session_state.feedback_submitted = False
+#             st.rerun()
+
+#     st.markdown("---")
+
+#     # ==========================================
+#     # [상태 1] CAMERA_INPUT 단계 (중앙 레티클 박스 활성화)
+#     # ==========================================
+#     if st.session_state.step == "CAMERA_INPUT":
+#         print("[LOG] 현재 상태: CAMERA_INPUT (사용자 촬영 대기 중)")
+#         st.markdown("#### [Z-Index 0] 풀스크린 뷰파인더 가이드라인")
+#         st.info("아래 카메라 화면에 나타난 초록색 네모 점선(Reticle) 안에 알약을 맞춘 뒤 [Take Photo]를 눌러주세요.")
+        
+#         cam_start = time.time()
+#         # 이제 CSS 효과에 의해 이 camera_input 상단 정중앙에 초록색 가이드 네모 박스가 강제로 조준선처럼 뜨게 됩니다.
+#         captured_file = st.camera_input("카메라 프리뷰 영역")
+#         print(f"[LOG] 카메라 컴포넌트 렌더링 소요 시간: {time.time() - cam_start:.4f}초")
+        
+#         if captured_file:
+#             st.session_state.captured_img = captured_file
+#             st.session_state.step = "AI_ANALYSIS"
+#             st.rerun()
+
+#     # ==========================================
+#     # [상태 2 & 3] 결과 및 확장 정보 단계
+#     # ==========================================
+#     elif st.session_state.step in ["AI_ANALYSIS", "EXPANDED_INFO"]:
+#         if st.session_state.step == "AI_ANALYSIS":
+#             if st.session_state.debug_skip_inference:
+#                 pass
+#             else:
+#                 with st.spinner("YOLO + ResNet 하이브리드 모델이 알약을 분석 중입니다..."):
+#                     time.sleep(1.2)
+#             st.session_state.step = "EXPANDED_INFO"
+#             st.rerun()
+            
+#         if st.session_state.debug_skip_inference:
+#             st.image(st.session_state.captured_img, caption="[디버그 모드] 원본 크롭 프리뷰", use_container_width=True)
+#         else:
+#             processed_img = simulate_yolo_resnet_inference(st.session_state.captured_img)
+#             st.image(processed_img, caption="Vision AI 핵심 계층: Bounding Box 시각화 결과", use_container_width=True)
+        
+#         st.markdown('<div class="glass-card">', unsafe_allow_html=True)
+#         res_col1, res_col2 = st.columns([7, 3])
+#         with res_col1:
+#             st.markdown("### **타이레놀정 500mg** <span class='badge-teal'>AI 확신도 98%</span>", unsafe_allow_html=True)
+#         with res_col2:
+#             if st.button("이 알약이 맞나요?", key="hitl_btn"):
+#                 st.session_state.feedback_submitted = True
+        
+#         if st.session_state.feedback_submitted:
+#             st.toast("전문가 개입(HITL) 데이터로 격리되었습니다.")
+            
+#         st.markdown("<hr style='margin:10px 0; border:0.5px solid rgba(255,255,255,0.1);'>", unsafe_allow_html=True)
+#         st.markdown("#### ⚠️ 복약 가이드 및 위험 경고")
+#         st.markdown("- <span class='badge-red'>치명적 경고</span> **병용금기:** 특정 소염진통제와 동시 복용 금지", unsafe_allow_html=True)
+#         st.markdown("- <span class='badge-orange'>주의 조치</span> **섭취 안내:** 음식물과 복용 시 흡수율 저하 가능성", unsafe_allow_html=True)
+#         st.markdown("<hr style='margin:10px 0; border:0.5px solid rgba(255,255,255,0.1);'>", unsafe_allow_html=True)
+#         st.markdown("#### 📍 근처 약국 위치 및 영업 상태 (LBS)")
+#         st.markdown("• **달빛정성약국** (거리 120m) — <span class='badge-green'>영업 중</span>")
+        
+#         st.components.v1.html(
+#             """
+#             <div style="background-color: #242424; color: #999999; height: 120px; 
+#                         display: flex; flex-direction:column; align-items: center; justify-content: center; 
+#                         border-radius: 12px; border: 1px solid rgba(255,255,255,0.1); font-size:14px;">
+#                 🗺️ [네이버 지도 Iframe 영역]
+#             </div>
+#             """,
+#             height=130
+#         )
+#         st.markdown('</div>', unsafe_allow_html=True)
+
+#     print(f"[LOG] 1회 사이클 전체 스크립트 실행 완료 순수 소요 시간: {time.time() - global_start:.4f}초")
+
+#===============================================
+# # streamlit_app.py
+# import streamlit as st
+# import time
+# from PIL import Image, ImageDraw
+
+# def apply_glassmorphism_css():
+#     """제안서 스펙에 맞춘 다크모드 및 rgba(255,255,255,0.05) 반투명 블러 CSS 주입"""
+#     start_time = time.time()
+#     st.markdown(
+#         """
+#         <style>
+#         /* 메인 앱 배경 다크화 */
+#         .stApp {
+#             background-color: #121212;
+#             color: #E0E0E0;
+#         }
+        
+#         /* Z-Index 2 정보 레이어를 대변하는 글래스모피즘 컨테이너 스펙 */
+#         .glass-card {
+#             background: rgba(255, 255, 255, 0.05);
+#             backdrop-filter: blur(10px);
+#             -webkit-backdrop-filter: blur(10px);
+#             border-radius: 20px;
+#             border: 1px solid rgba(255, 255, 255, 0.1);
+#             padding: 20px;
+#             margin-top: 15px;
+#         }
+        
+#         /* 맥락적 색상 코드 배지 스타일링 */
+#         .badge-teal { background-color: #008080; color: white; padding: 3px 8px; border-radius: 5px; font-size: 14px; font-weight: bold; }
+#         .badge-orange { background-color: #FF8C00; color: white; padding: 3px 8px; border-radius: 5px; font-size: 14px; font-weight: bold; }
+#         .badge-red { background-color: #DC143C; color: white; padding: 3px 8px; border-radius: 5px; font-size: 14px; font-weight: bold; }
+#         .badge-green { background-color: #2E7D32; color: white; padding: 3px 8px; border-radius: 5px; font-size: 14px; font-weight: bold; }
+#         </style>
+#         """,
+#         unsafe_allow_html=True
+#     )
+#     print(f"[LOG] CSS 스타일 주입 완료 소요 시간: {time.time() - start_time:.4f}초")
+
+# def simulate_yolo_resnet_inference(image_file):
+#     """YOLO+ResNet 하이브리드 추론 및 가이드라인 자동 크롭/Bounding Box 시각화 가상 구현"""
+#     start_time = time.time()
+    
+#     # 1. 파일 객체를 PIL 이미지로 변환
+#     img = Image.open(image_file)
+#     width, height = img.size
+#     print(f"[LOG] [PIL] 원본 이미지 로드 완료 ({width}x{height}) 소요 시간: {time.time() - start_time:.4f}초")
+    
+#     # 2. 이미지 중앙부에 Bounding Box 정보 가상 생성 (전처리 크롭 영역 대용)
+#     draw_start = time.time()
+#     draw = ImageDraw.Draw(img)
+#     start_point = (int(width * 0.35), int(height * 0.35))
+#     end_point = (int(width * 0.65), int(height * 0.65))
+    
+#     # 초록색(Teal/Green 계열) Bounding Box 시각화 주입
+#     draw.rectangle([start_point, end_point], outline="#00FFCD", width=8)
+#     print(f"[LOG] [PIL] 이미지 Bounding Box 드로잉 연산 소요 시간: {time.time() - draw_start:.4f}초")
+#     print(f"[LOG] Vision AI 전체 연산 최종 소요 시간: {time.time() - start_time:.4f}초")
+#     return img
+
+# def run_app():
+#     print("\n--- [LOG] Streamlit 스크립트 실행 시작 (Rerun Triggered) ---")
+#     global_start = time.time()
+    
+#     # 디버깅 편의를 위한 고속 화면 전환용 플래그 설정 (사이드바에 배치)
+#     st.sidebar.markdown("### 🛠️ 디버그 제어 플래그")
+#     if "debug_skip_inference" not in st.session_state:
+#         st.session_state.debug_skip_inference = False
+        
+#     st.session_state.debug_skip_inference = st.sidebar.checkbox(
+#         "AI 연산 및 드로잉 완전히 생략 (고속 절환 테스트)", 
+#         value=st.session_state.debug_skip_inference
+#     )
+    
+#     # 글래스모피즘 및 테마 스타일 주입
+#     apply_glassmorphism_css()
+    
+#     # 상단 내비게이션 바 레이아웃 (Z-Index 1 오버레이 파트 구현)
+#     col_nav1, col_nav2 = st.columns([8, 2])
+#     with col_nav1:
+#         st.markdown("<h3 style='margin:0;'>💊 알약 인식 통합 시스템</h3>", unsafe_allow_html=True)
+#     with col_nav2:
+#         if st.button("🔄 리셋"):
+#             print("[LOG] 사용자가 리셋 버튼을 클릭했습니다.")
+#             st.session_state.step = "CAMERA_INPUT"
+#             st.session_state.captured_img = None
+#             st.session_state.feedback_submitted = False
+#             st.rerun()
+
+#     st.markdown("---")
+
+#     # ==========================================
+#     # [상태 1] Z-Index 0 & 1: 기본 카메라 진입 및 찰칵 촬영
+#     # ==========================================
+#     if st.session_state.step == "CAMERA_INPUT":
+#         print("[LOG] 현재 상태: CAMERA_INPUT (사용자 촬영 대기 중)")
+#         st.markdown("#### [Z-Index 0] 풀스크린 뷰파인더 대용 계층")
+#         st.info("화면 중앙 Reticle 영역에 알약을 맞춘 뒤 촬영 버튼(FAB)을 눌러주세요.")
+        
+#         cam_start = time.time()
+#         captured_file = st.camera_input("카메라 프리뷰 영역")
+#         print(f"[LOG] 카메라 컴포넌트 렌더링 소요 시간: {time.time() - cam_start:.4f}초")
+        
+#         if captured_file:
+#             print("[LOG] 사진이 정상적으로 캡처되었습니다. AI_ANALYSIS 단계로 전환합니다.")
+#             st.session_state.captured_img = captured_file
+#             st.session_state.step = "AI_ANALYSIS"
+#             st.rerun()
+
+#     # ==========================================
+#     # [상태 2 & 3] AI 추론 완료 및 확장 정보 레이어 출력 단계
+#     # ==========================================
+#     elif st.session_state.step in ["AI_ANALYSIS", "EXPANDED_INFO"]:
+#         print(f"[LOG] 현재 상태: {st.session_state.step}")
+        
+#         # 1. Vision AI 백엔드 추론 작동 가속 스피너 시뮬레이션
+#         if st.session_state.step == "AI_ANALYSIS":
+#             if st.session_state.debug_skip_inference:
+#                 print("[LOG] [FLAG_ON] 디버그 플래그가 활성화되어 AI 모델 대기 연산(1.2초)을 전면 생략합니다.")
+#             else:
+#                 inference_wait_start = time.time()
+#                 with st.spinner("YOLO + ResNet 하이브리드 모델이 알약을 전처리 및 분석 중입니다..."):
+#                     time.sleep(1.2)  # 인프라 통신 및 GPU 연산 지연 가상 시뮬레이션
+#                 print(f"[LOG] AI 분석 시뮬레이션 대기 소요 시간: {time.time() - inference_wait_start:.4f}초")
+                
+#             st.session_state.step = "EXPANDED_INFO"
+#             st.rerun()
+            
+#         # 2. [Z-Index 1 오버레이 반영] Bounding Box 시각화 처리된 정적 이미지 배경 렌더링
+#         img_render_start = time.time()
+#         if st.session_state.debug_skip_inference:
+#             print("[LOG] [FLAG_ON] 디버그 플래그가 활성화되어 Pillow 그래픽 드로잉 처리를 패스하고 원본을 노출합니다.")
+#             st.image(st.session_state.captured_img, caption="[디버그 모드] 원본 크롭 프리뷰", use_container_width=True)
+#         else:
+#             processed_img = simulate_yolo_resnet_inference(st.session_state.captured_img)
+#             st.image(processed_img, caption="Vision AI 핵심 계층: Bounding Box 시각화 결과", use_container_width=True)
+#         print(f"[LOG] 화면 내 이미지 컴포넌트 출력 완료 소요 시간: {time.time() - img_render_start:.4f}초")
+        
+#         # 3. [Z-Index 2 정보 레이어] 글래스모피즘 바텀 시트 대용 컨테이너 전개
+#         card_start = time.time()
+#         st.markdown('<div class="glass-card">', unsafe_allow_html=True)
+        
+#         # --- 위계 1: 인식 결과 및 신뢰도 배지 + 피드백 루프 은닉 버튼 ---
+#         res_col1, res_col2 = st.columns([7, 3])
+#         with res_col1:
+#             st.markdown("### **타이레놀정 500mg** <span class='badge-teal'>AI 확신도 98%</span>", unsafe_allow_html=True)
+#         with res_col2:
+#             if st.button("이 알약이 맞나요?", key="hitl_btn"):
+#                 st.session_state.feedback_submitted = True
+        
+#         if st.session_state.feedback_submitted:
+#             st.toast("전문가 개입(HITL) 라벨링 뷰로 예외 데이터가 안전하게 격리되었습니다.")
+            
+#         st.markdown("<hr style='margin:10px 0; border:0.5px solid rgba(255,255,255,0.1);'>", unsafe_allow_html=True)
+        
+#         # --- 위계 2: Domain Data 기반 치명적 경고/병용금기 (Orange/Red 매핑) ---
+#         st.markdown("#### ⚠️ 복약 가이드 및 위험 경고")
+#         st.markdown("- <span class='badge-red'>치명적 경고</span> **병용금기:** 특정 성분의 소염진통제와 동시 복용을 금지합니다.", unsafe_allow_html=True)
+#         st.markdown("- <span class='badge-orange'>주의 조치</span> **섭취 안내:** 음식물과 함께 복용 시 흡수율에 영향이 있을 수 있습니다.", unsafe_allow_html=True)
+        
+#         st.markdown("<hr style='margin:10px 0; border:0.5px solid rgba(255,255,255,0.1);'>", unsafe_allow_html=True)
+        
+#         # --- 위계 3: LBS 위치 기반 근처 약국 정보 및 Naver 지도 Iframe 임베딩 ---
+#         st.markdown("#### 📍 근처 약국 위치 및 영업 상태 (LBS)")
+#         st.markdown("• **달빛정성약국** (거리 120m) — <span class='badge-green'>영업 중</span>", unsafe_allow_html=True)
+#         st.markdown("• **중앙사랑약국** (거리 340m) — <span class='badge-red'>영업 종료</span>", unsafe_allow_html=True)
+        
+#         # 네이버 지도 Iframe 임베딩 영역 모사
+#         st.components.v1.html(
+#             """
+#             <div style="background-color: #242424; color: #999999; height: 180px; 
+#                         display: flex; flex-direction:column; align-items: center; justify-content: center; 
+#                         border-radius: 12px; border: 1px solid rgba(255,255,255,0.1); font-size:14px;">
+#                 <span style="font-size:24px; margin-bottom:8px;">🗺️</span>
+#                 [공공데이터 API 연동 및 네이버 지도 Iframe 영역]
+#             </div>
+#             """,
+#             height=190
+#         )
+        
+#         st.markdown('</div>', unsafe_allow_html=True)
+#         print(f"[LOG] 하단 글래스모피즘 바텀시트 정보 레이어 출력 소요 시간: {time.time() - card_start:.4f}초")
+
+#     print(f"[LOG] 1회 사이클 전체 스크립트 실행 완료 순수 소요 시간: {time.time() - global_start:.4f}초")
+#     print("-------------------------------------------------------------------\n")
+
+#==========================================
+# import streamlit as st
+# import io
+# import os
+# import sys # Import sys
+# from PIL import Image
+# import cv2
+# import numpy as np
+
+# st.set_page_config(layout="wide")
+# st.title("💊 알약알쥐?💊2팀")
+
+# # --- Configuration for Local Environment --- 
+# # IMPORTANT: Adjust these paths for your local setup!
+# # On Colab, the PROJECT_DIR is /content/drive/MyDrive/github
+# # On your PC, it's /mnt/c/Users/kimhy/CodeItPJT/초급PJT/github
+# LOCAL_PROJECT_ROOT = "/mnt/c/Users/kimhy/CodeItPJT/초급PJT/github" # <--- YOU MUST CHANGE THIS ON YOUR LOCAL MACHINE
+
+# # Add the 'baseline' directory (where app_wrapper.py is located) to sys.path
+# baseline_dir = os.path.join(LOCAL_PROJECT_ROOT, "baseline")
+# if baseline_dir not in sys.path:
+#     sys.path.append(baseline_dir)
+
+# # Now, import PillPredictorWrapper
+# from app_wrapper import PillPredictorWrapper
+
+# # Construct the full path to the model weights
+# model_weights_path = os.path.join(baseline_dir, "outputs", "yolo", "train_m", "weights", "best.pt")
+
+# # Wrapper 초기화 (모델은 한 번만 로드)
+# @st.cache_resource
+# def load_predictor():
+#     return PillPredictorWrapper(pth_path=model_weights_path) # Use the constructed path
+
+# predictor = load_predictor()
+
+# st.header("이미지를 업로드하여 알약을 탐지하세요.")
+
+# uploaded_file = st.file_uploader("이미지 파일을 선택하세요", type=["jpg", "jpeg", "png"])
+
+# if uploaded_file is not None:
+#     # 업로드된 파일을 바이트 스트림으로 읽기
+#     image_bytes = uploaded_file.getvalue()
+
+#     # 원본 이미지 표시
+#     st.subheader("원본 이미지")
+#     st.image(image_bytes, caption="원본 이미지")#, use_column_width=True)
+
+#     # 예측 수행
+#     with st.spinner("알약을 탐지하는 중..."):
+#         refined_output, out_image_rgb = predictor.predict(image_bytes)
+
+#     # 결과 표시
+#     st.subheader("탐지 결과")
+
+#     if len(refined_output) > 0:
+#         st.image(out_image_rgb, caption="탐지된 알약")#, use_column_width=True)
+#         st.write("탐지된 알약 목록:")
+#         for item in refined_output:
+#             st.write(f"- **{item['label']}** (신뢰도: {item['confidence']:.2f}) at Box: {item['box']}")
+#     else:
+#         st.warning("이미지에서 알약을 탐지하지 못했습니다.")
+#         # 탐지 결과가 없을 경우 원본 이미지를 그대로 보여줌 (out_image_rgb가 에러 핸들링으로 원본 이미지를 반환할 수도 있음)
+#         if out_image_rgb is not None:
+#             st.image(out_image_rgb, caption="탐지 결과 없음")#, use_column_width=True)
+#         else:
+#             st.image(image_bytes, caption="탐지 결과 없음")#, use_column_width=True)
+
+# st.markdown("--- 압력 감지 모델은 AI 기반으로 구동됩니다. --- ")
+
+
+#================================
+# #streamlit_frontend.py
+# import streamlit as st
+# from app_wrapper import PillPredictorWrapper
+# from PIL import Image
+# import io
+
+# # added by 1차 개발자: 알약 전용 가중치 파일 경로를 인자로 전달하며 객체 생성
+# from app_wrapper import PillPredictorWrapper 
+
+# # 알약 전용 가중치 파일 경로를 인자로 전달하며 객체 생성
+# predictor = PillPredictorWrapper(pth_path="yolov8_custom_pill_detection_best.pt")
+
+# st.set_page_config(page_title="AI Pill Scanner", layout="wide")
+
+# st.title("💊 알약알쥐? 💊")
+# #st.info("이 앱은 app_wrapper.py를 통해 모델과 통신하며, 모델 내부 로직에 의존하지 않습니다.")
+
+# # # 1. 사이드바 - 모델 설정 (나중에 변경 가능)
+# # ##st.sidebar.header("Configuration")
+# # #model_path = st.sidebar.text_input("Model Path", value="yolov8n.pt")
+# # ##model_path = st.sidebar.text_input("Model Path", value="yolov8_custom_pill_detection_best_100epoch.pt")
+# # model_path = "yolov8_custom_pill_detection_best_100epoch.pt"
+
+# # # 2. 모델 로드 (캐싱하여 성능 최적화)
+# # @st.cache_resource
+# # def load_model(path):
+# #     return PillPredictorWrapper(pth_path=path)
+
+# # predictor = load_model(model_path)
+
+# from app_wrapper import PillPredictorWrapper
+
+# # added. 알약 전용 가중치 파일 경로를 인자로 전달하며 객체 생성
+# predictor = PillPredictorWrapper(pth_path="yolov8_custom_pill_detection_best_100epoch.pt")
+
+# # 3. 이미지 업로드
+# uploaded_file = st.file_uploader("이미지를 업로드하세요", type=['jpg', 'jpeg', 'png'])
+
+# if uploaded_file is not None:
+#     image_bytes = uploaded_file.read()
+    
+#     col1, col2 = st.columns(2)
+    
+#     with col1:
+#         st.subheader("원본 이미지")
+#         #st.image(image_bytes, use_column_width=True)
+#         st.image(image_bytes)
+    
+#     # 4. 추론 실행 (Wrapper 호출)
+#     with st.spinner('AI 분석 중...'):
+#         results, out_image = predictor.predict(image_bytes)
+    
+#     with col2:
+#         st.subheader("분석 결과")
+#         #st.image(out_image, use_column_width=True)
+#         st.image(out_image) 
+    
+#     # 5. 데이터 결과 표시
+#     st.divider()
+#     st.subheader("Raw Data (JSON)")
+#     st.json(results)
+    
+#     st.success("인터페이스 규격에 따른 데이터 수신 완료")
