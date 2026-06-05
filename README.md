@@ -4,11 +4,10 @@
 보고서 [2team 최종보고서.pdf](https://github.com/user-attachments/files/28588713/2team.pdf)
 PPT https://drive.google.com/drive/folders/1HCIzn5HzvsI8LEeaaDdMsgf5cf72I48Q?usp=sharing
 ## 깃허브 제출 
-전재완 https://traveling-hisser-ce1.notion.site/36422576234380e6b81cd2130ee8fd28?source=copy_link
-이태훈 [(협업일지 AI부트캠프 초급 팀프로젝트 2팀 이태훈) (1).pdf](https://github.com/user-attachments/files/28632600/AI.2.1.pdf)
-황인홍 https://concise-snowboard-3e4.notion.site/364082810eef80b49dabc5c1b76f25d2?v=364082810eef8031b2c3000caea27c76&source=copy_link 
-
-
+- 전재완 https://traveling-hisser-ce1.notion.site/36422576234380e6b81cd2130ee8fd28?source=copy_link
+- 이태훈 [(협업일지 AI부트캠프 초급 팀프로젝트 2팀 이태훈) (1).pdf](https://github.com/user-attachments/files/28632600/AI.2.1.pdf)
+- 황인홍 https://concise-snowboard-3e4.notion.site/364082810eef80b49dabc5c1b76f25d2?v=364082810eef8031b2c3000caea27c76&source=copy_link 
+- 김효진 https://insidious-flower-de8.notion.site/36912d20bf0a8063ac96d79c9c2c6e4a?source=copy_link
 
 
 > **스프린트 11 — 2팀**  
